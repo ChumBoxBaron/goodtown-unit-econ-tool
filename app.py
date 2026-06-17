@@ -263,7 +263,7 @@ def effective_payback(res):
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
-st.title("Goodtown Revenue Model Explorer.")
+st.title("Goodtown Revenue Model Explorer")
 st.caption(
     "Push your assumptions through all four revenue models at once. The whole point: "
     "watch the **model ranking flip** as utilization, subscription price, and cost of "
