@@ -176,6 +176,12 @@ HEADLINE_DEFAULTS = {
     "undiscounted_hub_cost": 88000,
     "target_unit_count": 5,
     "available_capital": 150000,
+
+    # --- Fleet / scaling projection (month-by-month cohort sim) ---
+    # cadence is a tunable what-if, not a forecast: 0 = deploy all units at once.
+    "fleet_cadence_months": 2,          # months between deployments (0–12)
+    "fleet_ramp_months": 6,             # linear utilization ramp per cohort (1–24)
+    "fleet_horizon_months": 36,         # projection window (6–120)
 }
 
 

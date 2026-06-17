@@ -165,6 +165,65 @@ def test_b2c_payback_falls_as_utilization_rises():
 
 
 # ---------------------------------------------------------------------------
+# Fleet / scaling cohort simulation
+# ---------------------------------------------------------------------------
+# Defaults: b2c steady net = 5501.6/mo, capital = 47050/unit.
+# Note on month indexing: series are 0-based and net accrues starting in the
+# deploy month, so a single unit recovers in month index 8 (the 9th month):
+#   (t+1)*5501.6 >= 47050  →  t+1 >= 8.55  →  t = 8.
+
+def test_fleet_all_at_once_instant_ramp():
+    inp = all_defaults()
+    f = calc.simulate_fleet("b2c", inp, total_units=2, cadence_months=0,
+                            ramp_months=1, horizon_months=24)
+    assert f["deployed_units"] == 2
+    assert f["live_units"][0] == 2                       # both land in month 0
+    assert approx(f["monthly_net"][0], 2 * 5501.6)       # full net, instant ramp
+    assert approx(f["cumulative_capital"][0], 2 * 47050)  # 2x capital sunk at t0
+    # Both capital and net scale 2x, so breakeven matches a single unit: month 8.
+    assert f["breakeven_month"] == math.ceil(47050 / 5501.6) - 1
+
+
+def test_fleet_staggered_schedule_and_trough():
+    inp = all_defaults()
+    f = calc.simulate_fleet("b2c", inp, total_units=3, cadence_months=2,
+                            ramp_months=1, horizon_months=24)
+    assert f["deploy_months"] == [0, 2, 4]
+    assert f["live_units"][0] == 1
+    assert f["live_units"][2] == 2
+    assert f["live_units"][4] == 3
+    assert f["peak_funding_need"] > 0       # capital lumps outrun early net
+    assert f["trough_month"] is not None
+
+
+def test_fleet_venue_buys_is_capital_free():
+    inp = all_defaults()
+    f = calc.simulate_fleet("venue_buys", inp, total_units=5, cadence_months=1,
+                            ramp_months=6, horizon_months=24)
+    assert f["peak_funding_need"] == 0      # never sinks capital
+    assert f["breakeven_month"] == 0        # cash-positive from the first month
+    assert not f["runs_dry"]
+
+
+def test_fleet_ramp_lowers_early_net_for_b2c():
+    inp = all_defaults()
+    f = calc.simulate_fleet("b2c", inp, total_units=1, cadence_months=0,
+                            ramp_months=6, horizon_months=24)
+    assert f["monthly_net"][0] < f["monthly_net"][5]    # utilization climbs
+    assert approx(f["steady_state_monthly_net"], 5501.6)  # full util by the end
+
+
+def test_fleet_zero_units_is_safe():
+    inp = all_defaults()
+    f = calc.simulate_fleet("b2c", inp, total_units=0, cadence_months=2,
+                            ramp_months=6, horizon_months=12)
+    assert f["deployed_units"] == 0
+    assert all(c == inp["available_capital"] for c in f["cash_curve"])
+    assert f["peak_funding_need"] == 0
+    assert f["breakeven_month"] is None
+
+
+# ---------------------------------------------------------------------------
 # Save / load round-trip (including a custom cost)
 # ---------------------------------------------------------------------------
 def test_save_load_roundtrip(tmp_path):

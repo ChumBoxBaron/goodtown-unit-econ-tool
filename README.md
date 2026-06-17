@@ -84,6 +84,29 @@ button all loop over the registry, so there's exactly one place to change.
 **Findings** (real-world anchors, in tooltips): Throne $4,250–9,000/unit/mo · ALCOVE $18/hr ·
 hub ~$44k/$88k · Jabbrrbox $15/30min.
 
+### Fleet / scaling over time
+
+The per-unit view is a timeless snapshot. The **Fleet economics over time** section models
+the real plan: a hero SKU (the 2-room hub) **replicated across locations, deployed gradually**.
+It's a month-by-month cohort simulation — each unit is a cohort that deploys at some month and
+earns net cash thereafter; the portfolio is the sum across live cohorts.
+
+- **Cadence is a tunable what-if, not a forecast.** You set *months between deployments* (`0` =
+  all units at once, the steady-state read) — exactly the same "we can't measure it, so make it
+  a lever" stance as utilization and cost of capital. The staggered schedule is *generated*, so
+  you never hand-build irregular timing.
+- **Per-cohort utilization ramp.** Each new location climbs linearly to the utilization slider
+  over *ramp months* — new venues take time to fill. The ramp affects **usage-based models only**
+  (B2C, hybrid overflow); B2B / venue-buys earn full net from month one because their revenue
+  doesn't depend on utilization.
+- **The headline metric is the peak cash trough** — the deepest the running cash balance goes,
+  i.e. the most capital tied up at once on this schedule. That, plus "outside capital needed
+  beyond your available cash" and the **breakeven month**, is the cash story that decides whether
+  a 2-person team survives the scale-up.
+- **Equity basis.** Capital is paid from cash at each deployment. The fleet view is shown on an
+  equity basis even when the per-unit table is in debt mode (a banner says so); per-cohort debt
+  amortization is a v2 item.
+
 **Assumptions** (validate before trusting): utilization, subscription price, every opex line,
 install cost, insurance. The footer in the app keeps this distinction visible.
 
@@ -92,3 +115,7 @@ install cost, insurance. The footer in the app keeps this distinction visible.
 Scenario-compare (diff two saved configs side by side) · plug in real Switchyards booking
 data to replace the utilization slider with an empirical distribution · sensitivity tornado
 chart · Monte Carlo on utilization · discount-erosion timeline · CAC / sales-cycle layer.
+
+**Fleet extensions:** self-funding / cash-gated deployment (reinvest net cash; throttle the
+cadence to what you can actually afford) · per-cohort debt amortization in the fleet view ·
+per-model fleet comparison (all four on one timeline).

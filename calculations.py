@@ -199,6 +199,137 @@ def compute_all(inputs, items=COST_ITEMS, model_keys=None):
 
 
 # ---------------------------------------------------------------------------
+# Fleet / scaling: a month-by-month cohort simulation
+# ---------------------------------------------------------------------------
+# The single-unit functions above are timeless snapshots. Real growth is a fleet
+# of one hero SKU replicated across locations, deployed gradually — so the things
+# that actually matter (peak cash needed, when the fleet turns cash-positive) only
+# show up once you simulate month by month. Each unit is a "cohort" that deploys at
+# some month and then earns net cash forever after; the portfolio is the sum across
+# live cohorts. Cadence is a tunable what-if (0 = all units at once), not a forecast.
+#
+# Basis: EQUITY. Capital is paid from cash at deploy and we use the equity-basis net
+# (before debt service). Per-cohort debt amortization is deliberately not modeled here.
+def _net_by_age(model_key, inputs, items, ramp_months, horizon_months):
+    """Monthly equity-net for a single cohort at each age 0..horizon-1.
+
+    Applies a linear utilization ramp: a cohort fills up over `ramp_months` rather
+    than hitting steady-state utilization on day one. Computed by overriding
+    utilization_pct and calling the existing _gross_net — no math is duplicated.
+
+    Usage-independent models (b2b, venue_buys) come out flat by construction: their
+    net doesn't read utilization, so the ramp has no effect on them. That's honest,
+    not a bug — surfaced in the UI caption.
+    """
+    inputs = resolve_inputs(inputs)
+    base_util = inputs["utilization_pct"]
+    out = []
+    for age in range(horizon_months):
+        if ramp_months <= 1:
+            factor = 1.0
+        else:
+            # age 0 (deploy month) earns 1/ramp of steady-state, climbing to full.
+            factor = min(1.0, (age + 1) / ramp_months)
+        probe = dict(inputs)
+        probe["utilization_pct"] = base_util * factor
+        _, net = _gross_net(model_key, probe, items)
+        out.append(net)
+    return out
+
+
+def simulate_fleet(model_key, inputs, items=COST_ITEMS, *,
+                   total_units, cadence_months, ramp_months, horizon_months):
+    """Simulate a fleet of one model replicated across `total_units` locations.
+
+    Deploys on a fixed cadence (months between deployments; 0 = all at once) with no
+    cash-gating — units land on schedule regardless of balance. Returns time series
+    plus the headline metrics (peak funding need, cash trough, breakeven month).
+
+    Equity basis: capital is spent from cash at each deploy; net is before financing.
+    """
+    H = max(0, int(horizon_months))
+    total_units = int(total_units)
+    months = list(range(H))
+
+    # Deployment schedule. cadence 0 => everyone lands in month 0. Drop any cohort
+    # scheduled beyond the horizon, and report how many actually fit.
+    if total_units <= 0 or H == 0:
+        deploy_months = []
+    elif cadence_months <= 0:
+        deploy_months = [0] * total_units
+    else:
+        deploy_months = [i * int(cadence_months) for i in range(total_units)]
+    deploy_months = [d for d in deploy_months if d < H]
+    deployed_units = len(deploy_months)
+
+    # Capex is utilization-independent, so compute it once; the per-cohort net curve
+    # is also computed once and then just shifted in time per cohort (cheap adds).
+    cap_per_unit = capital_at_risk(model_key, inputs, items)
+    net_by_age = _net_by_age(model_key, inputs, items, ramp_months, H)
+    steady_state_monthly_net = net_by_age[-1] if net_by_age else 0.0
+
+    live_units = [0] * H
+    monthly_net = [0.0] * H
+    capital_outlay = [0.0] * H
+    for d in deploy_months:
+        capital_outlay[d] += cap_per_unit
+        for t in range(d, H):
+            live_units[t] += 1
+            monthly_net[t] += net_by_age[t - d]
+
+    cumulative_capital, net_cash_from_zero, cash_curve = [], [], []
+    avail = inputs.get("available_capital", 0)
+    cum_cap = cum_net = 0.0
+    for t in range(H):
+        cum_cap += capital_outlay[t]
+        cum_net += monthly_net[t]
+        ncz = cum_net - cum_cap            # cash generated minus capital sunk, from $0
+        cumulative_capital.append(cum_cap)
+        net_cash_from_zero.append(ncz)
+        cash_curve.append(avail + ncz)     # actual balance given starting capital
+
+    if net_cash_from_zero:
+        trough_val = min(net_cash_from_zero)
+        trough_month = net_cash_from_zero.index(trough_val)
+        peak_funding_need = max(0.0, -trough_val)
+    else:
+        trough_month, peak_funding_need = None, 0.0
+
+    # First month cumulative net has repaid cumulative capital. Staggered deploys can
+    # re-dip after a later cohort lands, so this is the FIRST crossing (caveat in UI).
+    # An empty fleet has nothing to recover, so breakeven is undefined, not month 0.
+    if deployed_units == 0:
+        breakeven_month = None
+    else:
+        breakeven_month = next((t for t in range(H) if net_cash_from_zero[t] >= 0), None)
+
+    dry = [t for t in range(H) if cash_curve[t] < 0]
+    runs_dry = len(dry) > 0
+    dry_month = dry[0] if dry else None
+    outside_capital_needed = max(0.0, peak_funding_need - avail)
+
+    return {
+        "months": months,
+        "requested_units": total_units,
+        "deployed_units": deployed_units,
+        "deploy_months": deploy_months,
+        "live_units": live_units,
+        "monthly_net": monthly_net,
+        "cumulative_capital": cumulative_capital,
+        "net_cash_from_zero": net_cash_from_zero,
+        "cash_curve": cash_curve,
+        "peak_funding_need": peak_funding_need,
+        "trough_month": trough_month,
+        "breakeven_month": breakeven_month,
+        "runs_dry": runs_dry,
+        "dry_month": dry_month,
+        "outside_capital_needed": outside_capital_needed,
+        "steady_state_monthly_net": steady_state_monthly_net,
+        "cap_per_unit": cap_per_unit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Sweeps for the crossover chart
 # ---------------------------------------------------------------------------
 def _payback_for_chart(result, financed):

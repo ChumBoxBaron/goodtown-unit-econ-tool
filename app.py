@@ -207,6 +207,25 @@ with st.sidebar:
             min_value=0.0, max_value=5_000_000.0, step=10000.0,
             help="Deployable cash. Drives 'units you can self-fund'.")
 
+    # --- Fleet / scaling projection ---
+    with st.expander("Fleet / scaling projection"):
+        st.caption(
+            "Replicate the hero SKU across locations, deployed gradually. Uses "
+            "**Target unit count** and **Available capital** from *Capital & financing*."
+        )
+        int_num("Cadence — months between deployments", "fleet_cadence_months",
+                min_value=0, max_value=12,
+                help="0 = deploy all units at once (steady-state read). 2 = a new unit "
+                     "every 2 months. This is a tunable what-if, not a forecast.")
+        int_num("Utilization ramp (months)", "fleet_ramp_months",
+                min_value=1, max_value=24,
+                help="Each new location climbs from ~0 to the utilization slider over "
+                     "this many months. Affects usage-based models only (B2C, hybrid) — "
+                     "B2B / venue-buys earn full net from month one.")
+        int_num("Projection horizon (months)", "fleet_horizon_months",
+                min_value=6, max_value=120,
+                help="How far out to simulate. Units scheduled past the horizon are dropped.")
+
     # --- Scenarios + reset ---
     with st.expander("Scenarios (save / load)"):
         save_name = st.text_input("Save current as…", placeholder="weak hotel deal")
@@ -371,7 +390,97 @@ bar.update_layout(yaxis_title=f"Capital tied up at {N} units", height=320, margi
 st.plotly_chart(bar, width="stretch")
 
 # ---------------------------------------------------------------------------
-# 3d. Financing viability banner
+# 3d. Fleet economics over time (staggered deployment + utilization ramp)
+# ---------------------------------------------------------------------------
+st.subheader("Fleet economics over time")
+fleet_label = st.selectbox("Model to project", [label_of[k] for k in MODEL_KEYS],
+                           key="fleet_model")
+fleet_key = next(k for k in MODEL_KEYS if label_of[k] == fleet_label)
+
+fleet = calc.simulate_fleet(
+    fleet_key, inputs, items,
+    total_units=inputs["target_unit_count"],
+    cadence_months=inputs["fleet_cadence_months"],
+    ramp_months=inputs["fleet_ramp_months"],
+    horizon_months=inputs["fleet_horizon_months"],
+)
+
+if is_debt:
+    st.info(
+        "Fleet view is shown on an **equity basis** — capital is paid from cash at each "
+        "deployment. Per-cohort debt amortization isn't modeled here yet (the per-unit "
+        "table above does reflect your debt toggle)."
+    )
+
+cadence = inputs["fleet_cadence_months"]
+schedule_txt = "all at once" if cadence == 0 else f"one every {cadence} mo"
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Peak funding need", f"${fleet['peak_funding_need']:,.0f}",
+          help="Deepest the running cash position goes below zero — the most capital "
+               "tied up at once on this schedule. The number that decides if you survive.")
+m2.metric("Cash trough month",
+          "—" if fleet["trough_month"] is None else f"M{fleet['trough_month']}")
+m3.metric("Breakeven month",
+          "never" if fleet["breakeven_month"] is None else f"M{fleet['breakeven_month']}",
+          help="First month cumulative net cash repays cumulative capital deployed.")
+m4.metric("Steady-state net (all live)",
+          f"${fleet['steady_state_monthly_net'] * fleet['deployed_units']:,.0f}/mo")
+m5.metric("Outside capital needed", f"${fleet['outside_capital_needed']:,.0f}",
+          help=f"Peak funding need minus your available capital "
+               f"(${inputs['available_capital']:,.0f}).")
+
+if fleet["deployed_units"] < fleet["requested_units"]:
+    st.warning(
+        f"Only **{fleet['deployed_units']} of {fleet['requested_units']}** units fit in the "
+        f"{inputs['fleet_horizon_months']}-month horizon at this cadence. Extend the horizon "
+        f"or tighten the cadence to see the full fleet."
+    )
+if fleet["runs_dry"]:
+    st.error(
+        f"⚠️ **Cash goes negative at M{fleet['dry_month']}** — at {schedule_txt}, deployments "
+        f"outrun your ${inputs['available_capital']:,.0f} of capital. Slow the cadence, raise "
+        f"capital, or pick a lower-capital model."
+    )
+
+mo = fleet["months"]
+# Chart A: the cash story — capital sunk (step) vs running balance, trough marked.
+figA = go.Figure()
+figA.add_trace(go.Scatter(x=mo, y=fleet["cumulative_capital"], name="Cumulative capital deployed",
+                          mode="lines", line_shape="hv", line=dict(color="#c1432f")))
+figA.add_trace(go.Scatter(x=mo, y=fleet["cash_curve"], name="Running cash balance",
+                          mode="lines", line=dict(color="#2f7dc1")))
+figA.add_hline(y=0, line_dash="dash", line_color="gray")
+if fleet["trough_month"] is not None:
+    figA.add_vline(x=fleet["trough_month"], line_dash="dot", line_color="#c1432f")
+    figA.add_annotation(x=fleet["trough_month"], y=0, yshift=-10,
+                        text=f"trough M{fleet['trough_month']}",
+                        showarrow=False, font=dict(color="#c1432f"))
+figA.update_layout(xaxis_title="Month", yaxis_title="$", legend_title=None,
+                   height=400, margin=dict(t=20),
+                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
+st.plotly_chart(figA, width="stretch")
+
+# Chart B: the flywheel building — live units (step) vs portfolio net run-rate.
+figB = go.Figure()
+figB.add_trace(go.Scatter(x=mo, y=fleet["monthly_net"], name="Portfolio net / mo",
+                          mode="lines", line=dict(color="#2f7dc1")))
+figB.add_trace(go.Scatter(x=mo, y=fleet["live_units"], name="Live units",
+                          mode="lines", line_shape="hv", line=dict(color="#888"), yaxis="y2"))
+figB.update_layout(xaxis_title="Month", yaxis_title="Portfolio net ($/mo)",
+                   yaxis2=dict(title="Live units", overlaying="y", side="right",
+                               rangemode="tozero", showgrid=False),
+                   height=360, margin=dict(t=20),
+                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
+st.plotly_chart(figB, width="stretch")
+st.caption(
+    "Capital is paid from cash at each deployment (equity basis). The **ramp** affects "
+    "usage-based models only (B2C, hybrid overflow); B2B / venue-buys earn full net from "
+    "month one. Breakeven is the *first* month cumulative net repays cumulative capital — "
+    "with staggered deployment the cash curve can dip again after a later unit lands."
+)
+
+# ---------------------------------------------------------------------------
+# 3e. Financing viability banner
 # ---------------------------------------------------------------------------
 if is_debt:
     bleeders = [label_of[k] for k in MODEL_KEYS if results[k]["financed_bleeds"]]
@@ -386,7 +495,7 @@ if is_debt:
         )
 
 # ---------------------------------------------------------------------------
-# 3e. Honest-assumptions footer
+# 3f. Honest-assumptions footer
 # ---------------------------------------------------------------------------
 st.divider()
 st.caption(
