@@ -17,7 +17,7 @@ import streamlit as st
 import calculations as calc
 import config_io
 from cost_items import (
-    COST_ITEMS, MODELS, MODEL_KEYS, PODS, BENCHMARKS, all_defaults,
+    COST_ITEMS, MODELS, MODEL_KEYS, PODS, COMPARABLES, all_defaults,
 )
 
 st.set_page_config(page_title="Goodtown Revenue Model Explorer", layout="wide")
@@ -92,7 +92,7 @@ with st.sidebar:
     st.subheader("The numbers that decide everything")
     num("Monthly subscription price ($)", "monthly_subscription_price",
         min_value=1000.0, max_value=9000.0, step=100.0,
-        help="THE B2B lever = venue's willingness-to-pay. " + BENCHMARKS["Throne"])
+        help="THE B2B lever = venue's willingness-to-pay. " + COMPARABLES["Throne"])
     pct_slider("Annual interest rate %", "annual_interest_rate", 6, 25, 0.5,
                help="Cost of capital for debt-financed deployment. Asset-backed "
                     "financing only works above a viability threshold (see banner).")
@@ -137,7 +137,7 @@ with st.sidebar:
 
         st.checkbox("Use undiscounted hub ($88k) — models discount erosion",
                     key="use_undiscounted",
-                    help=BENCHMARKS["Goodtown_unit"])
+                    help=COMPARABLES["Goodtown_unit"])
 
         st.caption("Monthly opex (recurring)")
         for item in [i for i in COST_ITEMS if i["category"] == "opex_fixed"]:

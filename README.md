@@ -38,7 +38,7 @@ python -m pytest test_calculations.py -v
 |---|---|
 | `app.py` | Streamlit UI **only**. Loops over the cost registry to build inputs; renders the table, the break-even heatmap + contribution waterfall (with the crossover chart kept as a secondary line view), capital panel, banners, and scenario save/load. |
 | `calculations.py` | The financial math as **pure functions** (no Streamlit). Testable in isolation, so we trust the numbers before the charts. |
-| `cost_items.py` | The **single source of truth** for every input: the `COST_ITEMS` registry, the `PODS` structure (2-person + 4-person rooms), the headline/non-registry defaults, and the real-world `BENCHMARKS`. |
+| `cost_items.py` | The **single source of truth** for every input: the `COST_ITEMS` registry, the `PODS` structure (2-person + 4-person rooms), the headline/non-registry defaults, the real-world `COMPARABLES` (comp-company tooltips), and the `BENCHMARK_BANDS` calibration bands (low/target/high, justified by `BENCHMARKS.md`). |
 | `config_io.py` | Save/load named scenarios to `configs/*.json` (Streamlit-free, so the round-trip is unit-tested). |
 | `test_calculations.py` | Hand-worked assertions on the math, registry sums, custom costs, and save/load. |
 
@@ -144,3 +144,30 @@ chart · Monte Carlo on utilization · discount-erosion timeline · CAC / sales-
 **Fleet extensions:** self-funding / cash-gated deployment (reinvest net cash; throttle the
 cadence to what you can actually afford) · per-cohort debt amortization in the fleet view ·
 per-model fleet comparison (all four on one timeline).
+
+**Wire up `BENCHMARK_BANDS` (the Breather check).** `cost_items.BENCHMARK_BANDS` now holds the
+calibration bands (low/target/high) justified by `BENCHMARKS.md`, but **nothing consumes them yet** —
+they're inert data. Two pieces are missing: (1) a `calculations.py` function that computes the
+model's **break-even utilization** (the per-pod-hour util at which the model just pays back within
+its useful life) — today we only compute a break-even *month* in the fleet sim and a payback *grid*,
+not the break-even util the doc's reality-check needs; and (2) UI that overlays the
+`sustainable_utilization` ceiling (0.65–0.75) and the `breakeven_occupancy_ref` band on the heatmap,
+plus a red/green **Breather verdict** ("break-even util sits *above* what good hotels achieve →
+structurally Breather"). Until then the heatmap shows payback months but never tells you whether the
+required utilization is realistic. Also depends on an honest `bookable_hours_per_month` denominator
+(see the caveat in `BENCHMARKS.md`) for the verdict to mean anything.
+
+**Switchyards empirical utilization (the strongest realism anchor).** We have a self-built scraper
+collecting real booking/occupancy data for phone pods + conference rooms across the Atlanta locations
+of **Switchyards** (a neighborhood work-club / co-working concept) — the closest *same-product* comp
+for meeting-room demand, and primary observed data rather than a vendor's marketing number. Early
+read: utilization typically runs **~30–40% of bookable hours**. This is a better-calibrated ceiling
+for the Breather check than the hospitality band, because hotel "occupancy" (62–75%) is room-*nights*
+while Switchyards is share-of-bookable-*hours* — Goodtown's exact denominator. The hospitality band
+is likely too generous as a realism ceiling; the empirical Switchyards number can flip a green
+Breather verdict to red. Two convergent paths once the data is uploaded into the project: (a) derive
+an empirical `switchyards_utilization` band and add it to `BENCHMARK_BANDS` (rationale written into
+`BENCHMARKS.md` **first**, low/target/high derived from the dataset — do **not** hardcode the
+remembered "30–40%" as a finding); and (b) the existing roadmap item above — replace the
+`utilization_pct` slider with the empirical distribution. The Breather check should be read against
+this empirical band, not just the borrowed hospitality one.

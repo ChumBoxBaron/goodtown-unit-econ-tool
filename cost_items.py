@@ -14,7 +14,8 @@ Things that live here:
                       appears as an input and flows into capital-at-risk / opex.
   4. HEADLINE_DEFAULTS — the non-registry inputs (sliders, toggles, % rates) that
                       aren't simple per-unit sums.
-  5. BENCHMARKS     — hardcoded real-world anchors surfaced in tooltips/help text.
+  5. COMPARABLES    — hardcoded real-world comparable companies surfaced in tooltips.
+  6. BENCHMARK_BANDS — calibration bands (low/target/high) justified by BENCHMARKS.md.
 
 ------------------------------------------------------------------------------
 HOW TO ADD A NEW COST VARIABLE (the whole point of this design)
@@ -237,11 +238,12 @@ HEADLINE_DEFAULTS = {
 
 
 # ---------------------------------------------------------------------------
-# BENCHMARKS — real-world anchors (spec §5). Surfaced in help text so the user
-# always sees the data next to their assumptions and never mistakes a tuned
-# guess for a finding.
+# COMPARABLES — real-world comparable companies (spec §5). Surfaced in help text
+# so the user always sees the data next to their assumptions and never mistakes a
+# tuned guess for a finding. NOTE: these are qualitative *comps*, NOT the numeric
+# calibration bands — those live in BENCHMARK_BANDS below (justified by BENCHMARKS.md).
 # ---------------------------------------------------------------------------
-BENCHMARKS = {
+COMPARABLES = {
     "ALCOVE": "Closest comparable (premium private pods): $18/hr single-occupancy, "
               "15-min min, app-based keyless access. 5 locations, 4 of 5 inside hotels.",
     "Throne": "B2B subscription comparable: $4,250–$9,000 per unit/month, 10-unit "
@@ -251,6 +253,64 @@ BENCHMARKS = {
                  "for partners (IWG/Regus 3,750-unit deal) rather than operating solo.",
     "Goodtown_unit": "~$44k landed/hub discounted (Mute Modular), ~$88k undiscounted. "
                      "Excludes smart lock, LTE modem, and ops.",
+}
+
+
+# ---------------------------------------------------------------------------
+# BENCHMARK_BANDS — calibration bands (low/target/high) for the model's
+# load-bearing assumptions.
+#
+# RATIONALE lives in BENCHMARKS.md (repo root) — that doc is the source of truth
+# for every number and source string here. Edit the doc first, then mirror it into
+# this dict; the doc wins on any drift. (Distinct from COMPARABLES above, which is
+# qualitative comp tooltips, not numeric bands.)
+# ---------------------------------------------------------------------------
+BENCHMARK_BANDS = {
+    "target_payback": {
+        "maps_to": "target_payback_months",
+        "low": 12, "target": 24, "high": 36,
+        "source": "Vending payback 12–18mo in a good location (NAMA/SBA via VMF USA); "
+                  "stretched to 24–36mo because Goodtown capex (~$50k) is ~10× a vending "
+                  "machine. See BENCHMARKS.md §1.",
+    },
+    "sustainable_utilization": {
+        # FLAG: doc maps this to "utilization_pct", but there is no single such input key —
+        # the live keys are pod2_utilization_pct / pod4_utilization_pct (per pod).
+        "maps_to": "utilization_pct",  # (per pod) — see flag above
+        "low": 0.50, "target": 0.65, "high": 0.75,
+        "source": "Hotel occupancy ~62% national (CoStar/STR, PwC), 67–75% premium/luxury "
+                  "(CBRE/AHLA). See BENCHMARKS.md §2.",
+    },
+    "breakeven_occupancy_ref": {
+        "maps_to": None,  # reference band — compared to a COMPUTED break-even util, not an input
+        "low": 0.40, "target": 0.55, "high": 0.65,
+        "source": "Self-storage break-even ~40–60% opex-only, ~65% with debt service "
+                  "(Loan Analytics, Skyview). See BENCHMARKS.md §3.",
+    },
+    "location_commission": {
+        "maps_to": "venue_rev_share_pct",
+        "low": 0.10, "target": 0.15, "high": 0.25,
+        "source": "Vending location commission 10–25% of sales (NAMA/SBA via VMF USA). "
+                  "See BENCHMARKS.md §1.",
+    },
+    "payment_processing": {
+        "maps_to": "payment_proc_pct",
+        "low": 0.02, "target": 0.03, "high": 0.04,
+        "source": "Vending card processing 2–4% of gross (2.5–3.5% typical). See BENCHMARKS.md §1.",
+    },
+    "downtime_haircut": {
+        # FLAG: doc maps this to "availability_haircut_pct", but no downtime/haircut concept
+        # exists in the model yet (not in calculations.py or HEADLINE_DEFAULTS). Unimplemented key.
+        "maps_to": "availability_haircut_pct",  # NOT yet implemented — see flag above
+        "low": 0.03, "target": 0.04, "high": 0.05,
+        "source": "Vending downtime ~3–5% revenue loss (NAMA). See BENCHMARKS.md §1.",
+    },
+    "gross_margin_DO_NOT_IMPORT": {
+        "maps_to": None,  # note only — never wire this to an input
+        "low": 0.40, "target": 0.50, "high": 0.60,
+        "source": "Vending gross margin 40–60% on snacks — COGS-driven, DO NOT IMPORT "
+                  "(Goodtown has near-zero COGS). See BENCHMARKS.md §1.",
+    },
 }
 
 
