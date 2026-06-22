@@ -217,6 +217,10 @@ with st.sidebar:
                  format_func=lambda x: "Equity (cash)" if x == "equity" else "Debt-financed",
                  horizontal=True)
         int_num("Loan term (months)", "loan_term_months", min_value=6, max_value=84)
+        int_num("Target payback (months) — for Inverse mode", "target_payback_months",
+                min_value=6, max_value=60,
+                help="The payback ceiling you're willing to accept. Inverse mode solves "
+                     "for the max hardware spend that still hits this target.")
         int_num("Target unit count to deploy", "target_unit_count", min_value=1, max_value=50)
         num("Available capital ($)", "available_capital",
             min_value=0.0, max_value=5_000_000.0, step=10000.0,
@@ -291,19 +295,13 @@ st.caption(
 # ---------------------------------------------------------------------------
 st.subheader("Per-unit comparison")
 
-rows = []
-for k in MODEL_KEYS:
-    r = results[k]
-    pb = effective_payback(r)
-    rows.append({
-        "Model": label_of[k],
-        "Monthly gross": r["gross"],
-        "Monthly net": r["financed_net"] if (is_debt and r["is_debt"]) else r["net"],
-        "Capital at risk": r["capital"],
-        "Payback (mo)": math.nan if pb is None else pb,
-        "Annual ROIC": math.nan if r["roic"] is None else r["roic"],
-    })
-df = pd.DataFrame(rows).set_index("Model")
+econ_mode = st.radio(
+    "Mode",
+    ["Forward (capex → payback)", "Inverse (target payback → max capex)"],
+    horizontal=True,
+    help="Forward: given the capex stack, how long until payback? "
+         "Inverse: given a target payback, what's the most we can spend on hardware?",
+)
 
 
 def color_payback(v):
@@ -316,64 +314,240 @@ def color_payback(v):
     return "background-color: #f8d7da; color: #842029"        # red
 
 
-styler = (
-    df.style
-    .format({"Monthly gross": "${:,.0f}", "Monthly net": "${:,.0f}",
-             "Capital at risk": "${:,.0f}", "Payback (mo)": "{:,.1f}",
-             "Annual ROIC": "{:.0%}"}, na_rep="bleeds")
-    .map(color_payback, subset=["Payback (mo)"])
-)
-st.dataframe(styler, width="stretch")
-st.caption(
-    f"Payback shown on {'**debt-financed** net (after debt service)' if is_debt else '**equity** net'}. "
-    "Green <12mo · Yellow 12–24mo · Red >24mo or bleeds. Venue-buys is capital-free, so its "
-    "payback is instant and ROIC is undefined — that empty capital column *is* the argument for it."
-)
+if econ_mode.startswith("Forward"):
+    rows = []
+    for k in MODEL_KEYS:
+        r = results[k]
+        pb = effective_payback(r)
+        rows.append({
+            "Model": label_of[k],
+            "Monthly gross": r["gross"],
+            "Monthly net": r["financed_net"] if (is_debt and r["is_debt"]) else r["net"],
+            "Capital at risk": r["capital"],
+            "Payback (mo)": math.nan if pb is None else pb,
+            "Annual ROIC": math.nan if r["roic"] is None else r["roic"],
+        })
+    df = pd.DataFrame(rows).set_index("Model")
 
-# ---------------------------------------------------------------------------
-# 3b. Crossover chart
-# ---------------------------------------------------------------------------
-st.subheader("Crossover: where the winner flips")
-x_axis = st.radio("Sweep the X axis by:", ["Utilization", "Subscription price"], horizontal=True)
+    styler = (
+        df.style
+        .format({"Monthly gross": "${:,.0f}", "Monthly net": "${:,.0f}",
+                 "Capital at risk": "${:,.0f}", "Payback (mo)": "{:,.1f}",
+                 "Annual ROIC": "{:.0%}"}, na_rep="bleeds")
+        .map(color_payback, subset=["Payback (mo)"])
+    )
+    st.dataframe(styler, width="stretch")
+    st.caption(
+        f"Payback shown on {'**debt-financed** net (after debt service)' if is_debt else '**equity** net'}. "
+        "Green <12mo · Yellow 12–24mo · Red >24mo or bleeds. Venue-buys is capital-free, so its "
+        "payback is instant and ROIC is undefined — that empty capital column *is* the argument for it."
+    )
 
-if x_axis == "Utilization":
-    # Sweep the hidden utilization multiplier (scales BOTH pods together) since
-    # there's no single utilization input anymore. 0.25× … 3.0× of the pods' base.
-    xs = [round(0.25 + 0.05 * i, 2) for i in range(56)]   # 0.25× … 3.0×
-    sweep_key = "util_multiplier"
-    x_plot = xs
-    x_title = "Utilization (× pod base)"
-    fmt_cross = lambda x: f"{x:.2f}×"
 else:
-    xs = list(range(1000, 9001, 250))
-    sweep_key = "monthly_subscription_price"
-    x_plot = xs
-    x_title = "Monthly subscription price ($)"
-    fmt_cross = lambda x: f"${x:,.0f}"
+    target = inputs["target_payback_months"]
 
-series = calc.sweep(inputs, items, sweep_key, xs, MODEL_KEYS, financed=is_debt)
+    # Headline banner keyed to B2C — the hourly-rate × utilization model the
+    # inverse question is really about. Compared against our ~$50k landed actual.
+    b2c = results["b2c"]
+    b2c_max = calc.max_capex_for_payback(b2c["net"], target)
+    b2c_actual = b2c["capital"]
+    if b2c_max is None:
+        st.error(
+            f"**B2C bleeds** at these assumptions (net ≤ $0/mo) — no hardware spend "
+            f"ever pays back, so there's no max capex that hits a {target}-mo target."
+        )
+    elif b2c_actual <= b2c_max:
+        st.success(
+            f"**PASS** — our ~${b2c_actual:,.0f} landed estimate hits the {target}-mo "
+            f"B2C payback target. Max allowable capex is **${b2c_max:,.0f}** "
+            f"(${b2c_max - b2c_actual:,.0f} of headroom)."
+        )
+    else:
+        st.error(
+            f"**FAIL** — our ~${b2c_actual:,.0f} landed estimate misses the {target}-mo "
+            f"B2C payback target. Max allowable capex is **${b2c_max:,.0f}** "
+            f"(over budget by ${b2c_actual - b2c_max:,.0f})."
+        )
 
-fig = go.Figure()
-for k in MODEL_KEYS:
-    fig.add_trace(go.Scatter(x=x_plot, y=series[k], mode="lines", name=label_of[k],
-                             connectgaps=False))
-# annotate the B2C × B2B crossover — the headline decision point
-cross = calc.find_crossover(xs, series["b2c"], series["b2b"])
-if cross is not None:
-    cx = cross  # x_plot is already in axis units for both sweeps
-    fig.add_vline(x=cx, line_dash="dash", line_color="gray")
-    fig.add_annotation(x=cx, y=0, yshift=10,
-                       text=f"B2C overtakes B2B at {fmt_cross(cross)}",
-                       showarrow=False, font=dict(color="gray"))
-fig.update_layout(xaxis_title=x_title, yaxis_title="Payback (months)",
-                  yaxis_range=[0, 60], legend_title="Model", height=430,
-                  margin=dict(t=20))
-st.plotly_chart(fig, width="stretch")
+    inv_rows = []
+    for k in MODEL_KEYS:
+        r = results[k]
+        max_capex = calc.max_capex_for_payback(r["net"], target)
+        actual = r["capital"]
+        if max_capex is None:
+            verdict = "bleeds"
+        elif actual <= max_capex:
+            verdict = "PASS"
+        else:
+            verdict = "FAIL"
+        inv_rows.append({
+            "Model": label_of[k],
+            "Monthly net": r["net"],
+            "Max allowable capex": math.nan if max_capex is None else max_capex,
+            "Actual capex": actual,
+            "Verdict": verdict,
+        })
+    inv_df = pd.DataFrame(inv_rows).set_index("Model")
+
+    def color_verdict(v):
+        if v == "PASS":
+            return "background-color: #d1e7dd; color: #0f5132"   # green
+        return "background-color: #f8d7da; color: #842029"        # red (FAIL / bleeds)
+
+    inv_styler = (
+        inv_df.style
+        .format({"Monthly net": "${:,.0f}", "Max allowable capex": "${:,.0f}",
+                 "Actual capex": "${:,.0f}"}, na_rep="bleeds")
+        .map(color_verdict, subset=["Verdict"])
+    )
+    st.dataframe(inv_styler, width="stretch")
+    st.caption(
+        f"Max allowable capex = monthly **equity** net × {target}-mo target — the most "
+        "hardware spend that still pays back in time. PASS = our actual capex fits under "
+        "that ceiling. Equity-basis only; debt financing isn't reflected here. Venue-buys "
+        "is capital-free, so it passes at any target."
+    )
+
+# ---------------------------------------------------------------------------
+# 3b. Break-even heatmap (primary visual for the usage-driven view)
+# ---------------------------------------------------------------------------
+# The usage-driven models live in a 2-D space — blended hourly rate × utilization —
+# that a single crossover line can't show. The heatmap paints payback months across
+# that whole space, with a contour at the target payback and a marker where the
+# current assumptions sit. (B2B / venue-buys are utilization- AND rate-independent,
+# so a heatmap is degenerate for them — they stay in the crossover line view below.)
+st.subheader("Break-even heatmap: payback across rate × utilization")
+usage_labels = {"b2c": label_of["b2c"], "hybrid": label_of["hybrid"]}
+hm_label = st.radio("Model", list(usage_labels.values()), horizontal=True)
+hm_key = next(k for k, v in usage_labels.items() if v == hm_label)
+
+base_blended = calc.blended_hourly_rate(inputs)     # rate_mult 1.0 == today's blend
+base_util = calc._base_util_frac(inputs)            # hours-weighted utilization today
+target = inputs["target_payback_months"]
+
+# Axis grids. X spans 0.5×–1.5× of today's blended rate; Y spans 5%–60% utilization
+# (the per-pod slider range). Pure comprehensions — no numpy dependency.
+util_grid = [round(0.05 + 0.55 * i / 19, 4) for i in range(20)]       # 5% … 60%
+if base_blended > 0:
+    dollar_grid = [round(base_blended * (0.5 + 1.0 * i / 29), 2) for i in range(30)]
+    rate_mults = [d / base_blended for d in dollar_grid]
+    x_vals, x_title, x_tickfmt = dollar_grid, "Blended hourly rate ($/hr)", "$.2f"
+else:
+    # No revenue today (both rates 0): fall back to a multiplier axis so the $→×
+    # mapping never divides by zero. Marker still sits at the current point (1.0×).
+    rate_mults = [round(0.5 + 1.0 * i / 29, 3) for i in range(30)]
+    dollar_grid = rate_mults
+    x_vals, x_title, x_tickfmt = rate_mults, "Rate (× base)", ".2f"
+
+grid = calc.payback_grid(inputs, items, hm_key, util_grid, rate_mults, financed=is_debt)
+zmax = max(2 * target, 48)   # clamp so one near-bleed cell can't wash out the color
+
+hm = go.Figure()
+hm.add_trace(go.Heatmap(
+    z=grid["z"], x=x_vals, y=util_grid,
+    colorscale="RdYlGn_r", zmin=0, zmax=zmax,
+    colorbar=dict(title="Payback (mo)"),
+    hovertemplate=f"Rate %{{x:{x_tickfmt}}}<br>Util %{{y:.0%}}<br>"
+                  "Payback %{z:.1f} mo<extra></extra>",
+))
+# Single iso-line where payback == the target (coloring="none" → line only).
+hm.add_trace(go.Contour(
+    z=grid["z"], x=x_vals, y=util_grid,
+    contours=dict(start=target, end=target, size=1, coloring="none"),
+    line=dict(color="black", width=2, dash="dash"),
+    showscale=False, hoverinfo="skip",
+))
+# "You are here" — the current assumption point.
+marker_x = base_blended if base_blended > 0 else 1.0
+hm.add_trace(go.Scatter(
+    x=[marker_x], y=[base_util], mode="markers+text",
+    marker=dict(size=13, color="black", symbol="x"),
+    text=["you are here"], textposition="top center", showlegend=False,
+    hovertemplate=f"current<br>%{{x:{x_tickfmt}}} · %{{y:.0%}}<extra></extra>",
+))
+hm.update_layout(xaxis_title=x_title, yaxis_title="Utilization",
+                 yaxis_tickformat=".0%", height=460, margin=dict(t=20))
+st.plotly_chart(hm, width="stretch")
 st.caption(
-    "Flat lines are utilization-independent (B2B / venue-buys). The steep line is B2C — its "
-    "payback collapses as utilization rises. Below the crossover, B2B wins; above it, B2C wins. "
-    "Lines break where a model bleeds (no payback)."
+    f"Green pays back fast; red is slow. The dashed line is your target payback "
+    f"({target} mo) — anything on its green side clears the bar. The **✕** marks "
+    "your current assumptions. Blank cells = the model bleeds (no payback). The "
+    "utilization axis scales both pods together from their current blend; for base+"
+    "overflow, rate only bites above the overflow cap, so low-utilization rows look "
+    "rate-flat (that's honest, not a glitch)."
 )
+
+# ---------------------------------------------------------------------------
+# 3b-ii. Contribution-margin waterfall — where the money leaks, per unit / month
+# ---------------------------------------------------------------------------
+st.subheader("Where the money goes (per unit / month)")
+comps = calc.contribution_breakdown(hm_key, inputs, items)
+labels = [c[0] for c in comps]
+values = [c[1] for c in comps]
+wf = go.Figure(go.Waterfall(
+    orientation="v",
+    measure=["absolute"] + ["relative"] * (len(comps) - 1) + ["total"],
+    x=labels + ["Net"],
+    y=values + [0],
+    text=[f"${v:,.0f}" for v in values] + [""],
+    textposition="outside",
+    connector=dict(line=dict(color="gray")),
+    increasing=dict(marker=dict(color="#2f7dc1")),
+    decreasing=dict(marker=dict(color="#c1432f")),
+    totals=dict(marker=dict(color="#444")),
+))
+wf.update_layout(yaxis_title="$/month", height=380, margin=dict(t=20))
+st.plotly_chart(wf, width="stretch")
+st.caption(
+    "Revenue, then each charge that eats it, ending at monthly net per unit. Red bars "
+    "are the leaks — venue charge and processing scale with revenue; opex is fixed."
+)
+
+# ---------------------------------------------------------------------------
+# 3b-iii. Crossover line chart (kept, but secondary)
+# ---------------------------------------------------------------------------
+with st.expander("Crossover line view (all four models, secondary)"):
+    x_axis = st.radio("Sweep the X axis by:", ["Utilization", "Subscription price"],
+                      horizontal=True)
+
+    if x_axis == "Utilization":
+        # Sweep the hidden utilization multiplier (scales BOTH pods together) since
+        # there's no single utilization input anymore. 0.25× … 3.0× of the pods' base.
+        xs = [round(0.25 + 0.05 * i, 2) for i in range(56)]   # 0.25× … 3.0×
+        sweep_key = "util_multiplier"
+        x_plot = xs
+        x_title = "Utilization (× pod base)"
+        fmt_cross = lambda x: f"{x:.2f}×"
+    else:
+        xs = list(range(1000, 9001, 250))
+        sweep_key = "monthly_subscription_price"
+        x_plot = xs
+        x_title = "Monthly subscription price ($)"
+        fmt_cross = lambda x: f"${x:,.0f}"
+
+    series = calc.sweep(inputs, items, sweep_key, xs, MODEL_KEYS, financed=is_debt)
+
+    fig = go.Figure()
+    for k in MODEL_KEYS:
+        fig.add_trace(go.Scatter(x=x_plot, y=series[k], mode="lines", name=label_of[k],
+                                 connectgaps=False))
+    # annotate the B2C × B2B crossover — the headline decision point
+    cross = calc.find_crossover(xs, series["b2c"], series["b2b"])
+    if cross is not None:
+        cx = cross  # x_plot is already in axis units for both sweeps
+        fig.add_vline(x=cx, line_dash="dash", line_color="gray")
+        fig.add_annotation(x=cx, y=0, yshift=10,
+                           text=f"B2C overtakes B2B at {fmt_cross(cross)}",
+                           showarrow=False, font=dict(color="gray"))
+    fig.update_layout(xaxis_title=x_title, yaxis_title="Payback (months)",
+                      yaxis_range=[0, 60], legend_title="Model", height=430,
+                      margin=dict(t=20))
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        "Flat lines are utilization-independent (B2B / venue-buys). The steep line is B2C — its "
+        "payback collapses as utilization rises. Below the crossover, B2B wins; above it, B2C wins. "
+        "Lines break where a model bleeds (no payback)."
+    )
 
 # ---------------------------------------------------------------------------
 # 3c. Capital-to-scale panel

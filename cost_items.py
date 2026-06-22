@@ -202,6 +202,11 @@ HEADLINE_DEFAULTS = {
     # 1.0 = neutral. Used by the crossover sweep and the fleet utilization ramp.
     "util_multiplier": 1.0,
 
+    # Hidden seam (NOT a slider): the rate-side twin of util_multiplier — scales
+    # BOTH pod rates together. Default 1.0 = neutral. Used by the break-even
+    # heatmap to sweep the blended hourly rate (its X axis) through one key.
+    "rate_multiplier": 1.0,
+
     # --- B2C / venue economics ---
     "venue_charge_mode": "rev_share",   # "rev_share" | "rent"
     "venue_rev_share_pct": 0.15,        # share of B2C gross paid to venue
@@ -221,6 +226,7 @@ HEADLINE_DEFAULTS = {
     "undiscounted_hub_cost": 88000,
     "target_unit_count": 5,
     "available_capital": 150000,
+    "target_payback_months": 24,        # inverse mode: payback ceiling we'll accept
 
     # --- Fleet / scaling projection (month-by-month cohort sim) ---
     # cadence is a tunable what-if, not a forecast: 0 = deploy all units at once.

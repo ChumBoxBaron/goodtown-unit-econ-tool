@@ -83,30 +83,36 @@ def usage_hours(inputs, util_mult=1.0):
     return sum(pod_usage_hours(p, inputs, util_mult) for p in PODS)
 
 
-def pod_gross(inputs, util_mult=1.0):
+def pod_gross(inputs, util_mult=1.0, rate_mult=1.0):
     """Per-pod revenue summed = Σ (pod hours × pod rate).
 
     Returns (total_gross, total_hours) so callers that also need hours (the
     blended-rate display, hybrid overflow) don't recompute them.
+
+    `rate_mult` is the rate-side twin of `util_mult`: a neutral 1.0 by default,
+    the break-even heatmap sweeps it to scale BOTH pod rates together through one
+    key. It scales revenue (the numerator) but not hours (the denominator), so the
+    blended rate moves linearly with it while utilization stays independent.
     """
     gross = hours = 0.0
     for p in PODS:
         h = pod_usage_hours(p, inputs, util_mult)
-        gross += h * inputs[p["rate_key"]]
+        gross += h * inputs[p["rate_key"]] * rate_mult
         hours += h
     return gross, hours
 
 
-def blended_hourly_rate(inputs, util_mult=1.0):
+def blended_hourly_rate(inputs, util_mult=1.0, rate_mult=1.0):
     """Revenue-weighted blended hourly rate — a COMPUTED, read-only display value.
 
     Falls back to the simple average of pod rates when there are zero booked
     hours (so the UI shows a sane number at 0% utilization instead of dividing
-    by zero).
+    by zero). `rate_mult` scales the result linearly (blended == base × rate_mult),
+    which is what makes it a clean heatmap X axis.
     """
-    gross, hours = pod_gross(inputs, util_mult)
+    gross, hours = pod_gross(inputs, util_mult, rate_mult)
     if hours <= 0:
-        return sum(inputs[p["rate_key"]] for p in PODS) / len(PODS)
+        return rate_mult * sum(inputs[p["rate_key"]] for p in PODS) / len(PODS)
     return gross / hours
 
 
@@ -125,9 +131,9 @@ def payment_processing(gross, inputs):
 # ---------------------------------------------------------------------------
 # Per-model gross + net (monthly, equity basis before financing)
 # ---------------------------------------------------------------------------
-def _gross_net(model_key, inputs, items, util_mult=1.0):
+def _gross_net(model_key, inputs, items, util_mult=1.0, rate_mult=1.0):
     if model_key == "b2c":
-        gross, _ = pod_gross(inputs, util_mult)
+        gross, _ = pod_gross(inputs, util_mult, rate_mult)
         net = (gross
                - venue_charge(gross, inputs, inputs["venue_rev_share_pct"])
                - payment_processing(gross, inputs)
@@ -151,7 +157,7 @@ def _gross_net(model_key, inputs, items, util_mult=1.0):
         # priced at the revenue-weighted blended rate (the base+overflow deal is
         # struck at the hub level, not per room).
         overflow_hours = max(0.0, usage_hours(inputs, util_mult) - inputs["overflow_cap_hours"])
-        overflow_rev = overflow_hours * blended_hourly_rate(inputs, util_mult)
+        overflow_rev = overflow_hours * blended_hourly_rate(inputs, util_mult, rate_mult)
         gross = inputs["base_fee_hybrid"] + overflow_rev
         # Rev-share applies to the overflow usage portion only; rent is flat.
         if inputs.get("venue_charge_mode") == "rent":
@@ -197,6 +203,20 @@ def payback_months(capital, monthly_net):
     return capital / monthly_net
 
 
+def max_capex_for_payback(monthly_net, target_payback_months):
+    """Inverse of payback_months: the largest capital-at-risk that still pays
+    back within target_payback_months at this monthly net.
+
+    None == 'bleeds' (net ≤ 0): no finite capex ever pays back.
+    0   == non-positive target (a 0-month payback demands free hardware).
+    """
+    if target_payback_months <= 0:
+        return 0.0
+    if monthly_net <= 0:
+        return None
+    return monthly_net * target_payback_months
+
+
 def roic_annual(monthly_net, capital):
     """Simple annual ROIC. None when capital is ~0 (return is undefined/infinite)."""
     if capital <= 0:
@@ -212,7 +232,8 @@ def compute_model(model_key, inputs, items=COST_ITEMS):
     # The hidden utilization multiplier (default 1.0) is how the crossover sweep
     # turns the "utilization knob" across both pods through one input key.
     util_mult = inputs.get("util_multiplier", 1.0)
-    gross, net = _gross_net(model_key, inputs, items, util_mult=util_mult)
+    rate_mult = inputs.get("rate_multiplier", 1.0)
+    gross, net = _gross_net(model_key, inputs, items, util_mult=util_mult, rate_mult=rate_mult)
     capital = capital_at_risk(model_key, inputs, items)
 
     is_debt = inputs.get("financing_mode") == "debt"
@@ -241,6 +262,49 @@ def compute_all(inputs, items=COST_ITEMS, model_keys=None):
     return {k: compute_model(k, inputs, items) for k in keys}
 
 
+def contribution_breakdown(model_key, inputs, items=COST_ITEMS):
+    """Ordered per-unit monthly flow components for the contribution waterfall.
+
+    Returns [(label, signed_amount), ...] of the costs that eat revenue, with
+    revenue positive and every charge negative — the running total is the model's
+    net (asserted equal to compute_model(...)["net"] by a drift-guard test). The
+    usage-driven models (b2c, hybrid) get the full revenue → venue → processing →
+    opex breakdown; the fixed-revenue models (b2b, venue_buys) collapse to a
+    single opex line since they have no venue/processing leak.
+    """
+    inputs = resolve_inputs(inputs)
+    util_mult = inputs.get("util_multiplier", 1.0)
+    rate_mult = inputs.get("rate_multiplier", 1.0)
+
+    if model_key == "b2c":
+        gross, _ = pod_gross(inputs, util_mult, rate_mult)
+        venue = venue_charge(gross, inputs, inputs["venue_rev_share_pct"])
+        proc = payment_processing(gross, inputs)
+        opex = fixed_opex("b2c", inputs, items)
+    elif model_key == "hybrid":
+        overflow_hours = max(0.0, usage_hours(inputs, util_mult) - inputs["overflow_cap_hours"])
+        overflow_rev = overflow_hours * blended_hourly_rate(inputs, util_mult, rate_mult)
+        gross = inputs["base_fee_hybrid"] + overflow_rev
+        # Rev-share applies to the overflow portion only; rent is flat (mirrors _gross_net).
+        if inputs.get("venue_charge_mode") == "rent":
+            venue = inputs.get("flat_rent", 0)
+        else:
+            venue = inputs["venue_rev_share_pct_on_overflow"] * overflow_rev
+        proc = payment_processing(gross, inputs)
+        opex = fixed_opex("hybrid", inputs, items)
+    else:
+        # b2b / venue_buys: fixed revenue, no venue/processing friction — just opex.
+        gross, net = _gross_net(model_key, inputs, items, util_mult, rate_mult)
+        return [("Revenue", gross), ("Opex", -(gross - net))]
+
+    return [
+        ("Revenue", gross),
+        ("Venue charge", -venue),
+        ("Processing", -proc),
+        ("Opex", -opex),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Fleet / scaling: a month-by-month cohort simulation
 # ---------------------------------------------------------------------------
@@ -266,6 +330,7 @@ def _net_by_age(model_key, inputs, items, ramp_months, horizon_months):
     not a bug — surfaced in the UI caption.
     """
     inputs = resolve_inputs(inputs)
+    rate_mult = inputs.get("rate_multiplier", 1.0)
     out = []
     for age in range(horizon_months):
         if ramp_months <= 1:
@@ -273,7 +338,7 @@ def _net_by_age(model_key, inputs, items, ramp_months, horizon_months):
         else:
             # age 0 (deploy month) earns 1/ramp of steady-state, climbing to full.
             factor = min(1.0, (age + 1) / ramp_months)
-        _, net = _gross_net(model_key, inputs, items, util_mult=factor)
+        _, net = _gross_net(model_key, inputs, items, util_mult=factor, rate_mult=rate_mult)
         out.append(net)
     return out
 
@@ -395,6 +460,47 @@ def sweep(inputs, items, x_key, x_values, model_keys, financed=False):
             res = compute_model(k, probe, items)
             series[k].append(_payback_for_chart(res, financed))
     return series
+
+
+def _base_util_frac(inputs):
+    """Hours-weighted utilization across pods = booked hrs / bookable hrs.
+
+    The single "effective utilization" number the heatmap's Y axis uses; at
+    util_multiplier 1.0 it equals the bookable-weighted blend of the per-pod
+    utilizations. Returns 0.0 when there are no bookable hours (guards the
+    util→multiplier mapping against divide-by-zero).
+    """
+    total_bookable = sum(inputs[p["bookable_key"]] for p in PODS)
+    if total_bookable <= 0:
+        return 0.0
+    return usage_hours(inputs, 1.0) / total_bookable
+
+
+def payback_grid(inputs, items, model_key, util_fracs, rate_mults, financed=False):
+    """2D payback matrix for the break-even heatmap.
+
+    Rows are effective utilization fractions (`util_fracs`); columns are rate
+    multipliers (`rate_mults`). Each utilization row is one reuse of `sweep()`
+    over the rate_multiplier key with a single-element model list, so a cell
+    computes exactly the selected model and nothing else.
+
+    Returns {"z", "rate_mults", "util_fracs", "base_util_frac", "base_blended"};
+    z[row][col] is payback months or None (bleeds → a blank heatmap cell). Each
+    target utilization is mapped to a util_multiplier via the current pod blend;
+    if the base utilization is 0 (nothing bookable/booked) the rows fall back to
+    the current multiplier so the call never divides by zero.
+    """
+    base_util = _base_util_frac(inputs)
+    base_blended = blended_hourly_rate(inputs)
+    z = []
+    for frac in util_fracs:
+        probe = dict(inputs)
+        probe["util_multiplier"] = (frac / base_util) if base_util > 0 \
+            else inputs.get("util_multiplier", 1.0)
+        row = sweep(probe, items, "rate_multiplier", rate_mults, [model_key], financed)
+        z.append(row[model_key])
+    return {"z": z, "rate_mults": list(rate_mults), "util_fracs": list(util_fracs),
+            "base_util_frac": base_util, "base_blended": base_blended}
 
 
 def find_crossover(x_values, line_a, line_b):

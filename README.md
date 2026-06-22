@@ -36,7 +36,7 @@ python -m pytest test_calculations.py -v
 
 | File | What it holds |
 |---|---|
-| `app.py` | Streamlit UI **only**. Loops over the cost registry to build inputs; renders the table, crossover chart, capital panel, banners, and scenario save/load. |
+| `app.py` | Streamlit UI **only**. Loops over the cost registry to build inputs; renders the table, the break-even heatmap + contribution waterfall (with the crossover chart kept as a secondary line view), capital panel, banners, and scenario save/load. |
 | `calculations.py` | The financial math as **pure functions** (no Streamlit). Testable in isolation, so we trust the numbers before the charts. |
 | `cost_items.py` | The **single source of truth** for every input: the `COST_ITEMS` registry, the `PODS` structure (2-person + 4-person rooms), the headline/non-registry defaults, and the real-world `BENCHMARKS`. |
 | `config_io.py` | Save/load named scenarios to `configs/*.json` (Streamlit-free, so the round-trip is unit-tested). |
@@ -94,6 +94,19 @@ button all loop over the registry, so there's exactly one place to change.
 
 **Findings** (real-world anchors, in tooltips): Throne $4,250–9,000/unit/mo · ALCOVE $18/hr ·
 hub ~$44k/$88k · Jabbrrbox $15/30min.
+
+### Forward vs. Inverse (solve for max capex)
+
+The per-unit comparison has two modes:
+
+- **Forward (capex → payback)** — the default. Plug in the capex stack, read the payback
+  period for each model.
+- **Inverse (target payback → max capex)** — flip the question. Set a **target payback**
+  (months you're willing to accept) and the tool solves for the **maximum landed hardware
+  cost** that still hits it: `max_capex = monthly_net × target_payback`. It shows that ceiling
+  next to our actual ~$50k landed estimate with a PASS/FAIL banner, so you can see at a glance
+  whether a deal pencils. Equity-basis net only (financing isn't reflected); venue-buys is
+  capital-free, so it passes at any target.
 
 ### Fleet / scaling over time
 

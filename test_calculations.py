@@ -187,6 +187,37 @@ def test_payback_bleeds_when_net_nonpositive():
     assert res["payback"] is None             # UI renders this as "bleeds"
 
 
+def test_max_capex_direct_formula():
+    # max_capex = monthly_net × target_payback_months.
+    assert approx(calc.max_capex_for_payback(1000, 24), 24000)
+
+
+def test_max_capex_guards():
+    assert calc.max_capex_for_payback(-50, 24) is None    # bleeds → no finite capex
+    assert calc.max_capex_for_payback(0, 24) is None      # net 0 also bleeds
+    assert calc.max_capex_for_payback(1000, 0) == 0.0     # 0-mo target → free hardware
+    assert calc.max_capex_for_payback(1000, -5) == 0.0    # non-positive target
+
+
+def test_inverse_of_forward_roundtrips_capex():
+    # inverse(forward(capex)) == capex for a model with positive net.
+    inp = all_defaults()
+    res = calc.compute_model("b2c", inp)
+    net, capex = res["net"], res["capital"]
+    assert net > 0 and capex > 0
+    pb = calc.payback_months(capex, net)               # forward: capex → payback
+    assert approx(calc.max_capex_for_payback(net, pb), capex)   # inverse → capex
+
+
+def test_forward_of_inverse_roundtrips_payback():
+    # payback_months(max_capex(net, T), net) == T.
+    inp = all_defaults()
+    net = calc.compute_model("b2c", inp)["net"]
+    target = 24
+    max_capex = calc.max_capex_for_payback(net, target)
+    assert approx(calc.payback_months(max_capex, net), target)
+
+
 def test_debt_service_known_amortization():
     # $10,000 at 1%/mo for 12 months → ~$888.49/mo (standard amortization).
     inp = {"annual_interest_rate": 0.12, "loan_term_months": 12}
@@ -323,12 +354,65 @@ def test_config_v1_to_v2_migration():
         assert inputs[f"{p}_utilization_pct"] == 0.25
         assert inputs[f"{p}_bookable_hours_per_month"] == 600
     assert inputs["util_multiplier"] == 1.0
+    assert inputs["rate_multiplier"] == 1.0
     assert inputs["monthly_subscription_price"] == 2500   # untouched
 
     # Dead v1 keys are gone.
     for dead in ("blended_hourly_rate", "utilization_pct",
                  "prime_hours_per_month", "rooms_per_hub"):
         assert dead not in inputs
+
+
+# ---------------------------------------------------------------------------
+# rate_multiplier seam (the heatmap X-axis knob) + contribution waterfall
+# ---------------------------------------------------------------------------
+def test_rate_multiplier_scales_blended():
+    """The rate seam scales the blended rate linearly; utilization is untouched."""
+    inp = all_defaults()
+    base = calc.blended_hourly_rate(inp)
+    assert approx(calc.blended_hourly_rate(inp, rate_mult=2.0), 2 * base)
+    # Hours (the denominator) must NOT move with rate — only revenue does.
+    g1, h1 = calc.pod_gross(inp, rate_mult=1.0)
+    g2, h2 = calc.pod_gross(inp, rate_mult=2.0)
+    assert approx(h1, h2)
+    assert approx(g2, 2 * g1)
+
+
+def test_rate_multiplier_neutral_default():
+    """Threading the new key through at 1.0 must not move any headline number."""
+    inp = all_defaults()
+    assert inp["rate_multiplier"] == 1.0
+    for mk in ("b2c", "b2b", "venue_buys", "hybrid"):
+        res = calc.compute_model(mk, inp)
+        # Re-run with the key explicitly absent — identical results prove the
+        # default path and the present-at-1.0 path agree.
+        bare = dict(inp); bare.pop("rate_multiplier")
+        assert approx(res["net"], calc.compute_model(mk, bare)["net"])
+
+
+def test_contribution_breakdown_matches_net():
+    """The waterfall flows must sum to the model's net — the drift guard."""
+    inp = all_defaults()
+    for mk in ("b2c", "hybrid"):
+        comps = calc.contribution_breakdown(mk, inp)
+        assert approx(sum(a for _, a in comps), calc.compute_model(mk, inp)["net"])
+    # Rent mode changes the venue-charge term's shape — reconcile there too.
+    rent = all_defaults()
+    rent["venue_charge_mode"] = "rent"
+    comps = calc.contribution_breakdown("b2c", rent)
+    assert approx(sum(a for _, a in comps), calc.compute_model("b2c", rent)["net"])
+
+
+def test_payback_grid_shape_and_marker_cell():
+    """payback_grid returns a rows×cols matrix; the cell at the current point
+    (rate_mult 1.0, util at base) matches the snapshot payback."""
+    inp = all_defaults()
+    base_util = calc._base_util_frac(inp)
+    # One row at today's utilization, one column at today's rate (mult 1.0).
+    grid = calc.payback_grid(inp, COST_ITEMS, "b2c", [base_util], [1.0])
+    assert len(grid["z"]) == 1 and len(grid["z"][0]) == 1
+    assert approx(grid["z"][0][0], calc.compute_model("b2c", inp)["payback"])
+    assert approx(grid["base_util_frac"], base_util)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,7 @@ def _migrate_inputs(inputs):
         inputs.setdefault(f"{p}_utilization_pct", util)
         inputs.setdefault(f"{p}_bookable_hours_per_month", hrs)
     inputs.setdefault("util_multiplier", 1.0)
+    inputs.setdefault("rate_multiplier", 1.0)
     return inputs
 
 
