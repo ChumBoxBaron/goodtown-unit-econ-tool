@@ -7,20 +7,21 @@ st.session_state, hands it here, and reloads it the same way.
 
 A saved config is the FULL input set so a scenario reproduces exactly:
     {
-      "version": 1,
+      "version": 2,
       "name": "weak hotel deal",
       "inputs": { ... every input value ... },
       "custom_costs": [ {registry-shaped dict}, ... ]
     }
 
-This is deliberately the same shape v2's scenario-compare will diff.
+Older (v1) saves used a single blended rate / utilization / room count; from_state
+migrates them onto the two-pod schema on load (see _migrate_inputs).
 """
 
 import json
 import re
 from pathlib import Path
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 DEFAULT_DIR = Path(__file__).parent / "configs"
 
 
@@ -40,9 +41,36 @@ def to_state(inputs, custom_costs, name=""):
     }
 
 
+def _migrate_inputs(inputs):
+    """Bring a saved input set up to the current schema (v1 → v2, in place-ish).
+
+    v1 modeled the hub as N identical rooms: one blended_hourly_rate, one
+    utilization_pct, one prime_hours_per_month, and a rooms_per_hub count. v2
+    models two distinct pods. We map the single v1 values onto BOTH pods so an old
+    scenario reproduces its prior numbers, then drop the dead keys.
+
+    Idempotent: a v2 payload (already has pod keys) passes straight through.
+    """
+    if "pod2_hourly_rate" in inputs:        # already v2 — nothing to do
+        return inputs
+    rate = inputs.pop("blended_hourly_rate", 30)
+    util = inputs.pop("utilization_pct", 0.20)
+    hrs = inputs.pop("prime_hours_per_month", 300)
+    # Door count is now fixed at 2 by the PODS topology; an old rooms_per_hub != 2
+    # can't be represented, so we drop it (the scenario's lock count snaps to 2).
+    inputs.pop("rooms_per_hub", None)
+    for p in ("pod2", "pod4"):
+        inputs.setdefault(f"{p}_hourly_rate", rate)
+        inputs.setdefault(f"{p}_utilization_pct", util)
+        inputs.setdefault(f"{p}_bookable_hours_per_month", hrs)
+    inputs.setdefault("util_multiplier", 1.0)
+    return inputs
+
+
 def from_state(state):
     """Unpack a state dict back into (inputs, custom_costs). Tolerant of missing keys."""
-    return dict(state.get("inputs", {})), [dict(c) for c in state.get("custom_costs", [])]
+    inputs = _migrate_inputs(dict(state.get("inputs", {})))
+    return inputs, [dict(c) for c in state.get("custom_costs", [])]
 
 
 def _dir(configs_dir):

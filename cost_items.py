@@ -6,13 +6,15 @@ This module is intentionally *data only* (plus a couple of tiny helpers). The UI
 from the structures defined here, so there is exactly one place to edit when a
 cost changes or a new one is added.
 
-Three things live here:
+Things that live here:
   1. MODELS         — the four revenue models we compare, by key.
-  2. COST_ITEMS     — the cost-item registry. Add a dict here and it automatically
+  2. PODS           — the two rooms (2-person + 4-person) that make up a hub, each
+                      with its own rate/utilization/bookable-hours input keys.
+  3. COST_ITEMS     — the cost-item registry. Add a dict here and it automatically
                       appears as an input and flows into capital-at-risk / opex.
-  3. HEADLINE_DEFAULTS — the non-registry inputs (sliders, toggles, % rates) that
+  4. HEADLINE_DEFAULTS — the non-registry inputs (sliders, toggles, % rates) that
                       aren't simple per-unit sums.
-  4. BENCHMARKS     — hardcoded real-world anchors surfaced in tooltips/help text.
+  5. BENCHMARKS     — hardcoded real-world anchors surfaced in tooltips/help text.
 
 ------------------------------------------------------------------------------
 HOW TO ADD A NEW COST VARIABLE (the whole point of this design)
@@ -44,6 +46,40 @@ GOODTOWN_OWNED = ["b2c", "b2b", "hybrid"]
 
 
 # ---------------------------------------------------------------------------
+# THE PODS — the conjoined hub is two distinct rooms, not N identical ones.
+# ---------------------------------------------------------------------------
+# A "conjoined hub" is physically a 2-person room + a 4-person room sharing a
+# wall. They have genuinely different pricing power (the 4-person room commands a
+# higher rate), so we model each pod separately and SUM their revenue rather than
+# multiplying one blended rate by a room count.
+#
+# Each pod is pure structure: its identity, its door count (1 room = 1 door, which
+# drives per_door capex), and the flat input-key NAMES for its three revenue
+# drivers. The values themselves live in the flat `inputs` dict under those keys
+# (see HEADLINE_DEFAULTS) — the same structure/value split COST_ITEMS uses, so
+# config_io round-trips and app.py's session-state loops need zero special-casing.
+PODS = [
+    {"key": "pod2", "label": "2-person pod", "doors": 1,
+     "rate_key": "pod2_hourly_rate", "util_key": "pod2_utilization_pct",
+     "bookable_key": "pod2_bookable_hours_per_month"},
+    {"key": "pod4", "label": "4-person pod", "doors": 1,
+     "rate_key": "pod4_hourly_rate", "util_key": "pod4_utilization_pct",
+     "bookable_key": "pod4_bookable_hours_per_month"},
+]
+POD_KEYS = [p["key"] for p in PODS]
+
+
+def total_doors(inputs=None):
+    """Total door/room count across all pods — drives every per_door cost.
+
+    Takes (and ignores) `inputs` so a future variable-door design needs no
+    signature change. Reads the module-level PODS, which is what lets tests
+    monkeypatch the pod set to verify per-door scaling.
+    """
+    return sum(p["doors"] for p in PODS)
+
+
+# ---------------------------------------------------------------------------
 # THE COST-ITEM REGISTRY
 # ---------------------------------------------------------------------------
 # Each entry is one cost input. Fields:
@@ -54,7 +90,7 @@ GOODTOWN_OWNED = ["b2c", "b2b", "hybrid"]
 #                (Payment processing is NOT here — it scales with revenue, so it
 #                 lives in calculations.py, not as a flat sum.)
 #   default/min/max/step — for the input widget and the Reset button.
-#   per_door   — if True, the value is multiplied by rooms_per_hub (e.g. 2 locks).
+#   per_door   — if True, the value is multiplied by total pod door count (e.g. 2 locks).
 #   applies_to — which model keys this cost hits. This is how the B2C-vs-B2B opex
 #                difference emerges from data instead of two hand-tuned lump sums:
 #                consumer-facing support only applies_to the consumer models.
@@ -74,8 +110,8 @@ COST_ITEMS = [
         "key": "smart_lock_hw", "label": "Smart lock hardware (per door)", "category": "capex",
         "default": 400, "min": 0, "max": 2000, "step": 50,
         "per_door": True, "applies_to": GOODTOWN_OWNED,
-        "help": "Keyless smart lock per room door. Scales with rooms_per_hub "
-                "(a 2-room hub needs 2 locks). Excluded from the Mute hub quote.",
+        "help": "Keyless smart lock per room door. Scales with total pod door "
+                "count (2 by default: one per pod). Excluded from the Mute hub quote.",
     },
     {
         "key": "lte_router_hw", "label": "LTE router hardware", "category": "capex",
@@ -147,15 +183,24 @@ COST_ITEMS = [
 # the Reset button has one place to read from.
 # ---------------------------------------------------------------------------
 HEADLINE_DEFAULTS = {
-    # --- The three load-bearing assumptions (prominent sliders) ---
-    "utilization_pct": 0.20,            # THE B2C lever. 5%–60%.
+    # --- The two load-bearing non-pod assumptions (prominent sliders) ---
     "monthly_subscription_price": 2500, # THE B2B lever. $1k–$9k.
     "annual_interest_rate": 0.14,       # cost of capital. 6%–25%.
 
-    # --- Shared unit economics ---
-    "rooms_per_hub": 2,
-    "prime_hours_per_month": 720,       # bookable prime hrs/room/month
-    "blended_hourly_rate": 30,          # ALCOVE benchmark is $18/hr single-occupancy
+    # --- Per-pod revenue drivers (flat keys named by PODS[*]["*_key"]) ---
+    # The conjoined hub = a 2-person pod + a 4-person pod, each priced separately.
+    # Revenue is summed per pod (see calculations.pod_gross); the "blended" rate is
+    # a COMPUTED, revenue-weighted display value, not an input.
+    "pod2_hourly_rate": 15,             # 2-person room rate. ALCOVE is $18/hr single-occ.
+    "pod2_utilization_pct": 0.20,       # share of THIS pod's bookable hours.
+    "pod2_bookable_hours_per_month": 300,  # realistic bookable capacity (~10 hrs/day × 30).
+    "pod4_hourly_rate": 30,             # 4-person room commands a higher rate.
+    "pod4_utilization_pct": 0.20,
+    "pod4_bookable_hours_per_month": 300,
+
+    # Hidden seam (NOT a slider): scales BOTH pods' utilization together. Default
+    # 1.0 = neutral. Used by the crossover sweep and the fleet utilization ramp.
+    "util_multiplier": 1.0,
 
     # --- B2C / venue economics ---
     "venue_charge_mode": "rev_share",   # "rev_share" | "rent"

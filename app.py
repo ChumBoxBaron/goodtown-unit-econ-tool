@@ -17,7 +17,7 @@ import streamlit as st
 import calculations as calc
 import config_io
 from cost_items import (
-    COST_ITEMS, MODELS, MODEL_KEYS, BENCHMARKS, all_defaults,
+    COST_ITEMS, MODELS, MODEL_KEYS, PODS, BENCHMARKS, all_defaults,
 )
 
 st.set_page_config(page_title="Goodtown Revenue Model Explorer", layout="wide")
@@ -87,11 +87,9 @@ def pct_slider(label, key, lo, hi, step, help=None):
 with st.sidebar:
     st.header("Assumptions")
 
-    # --- The three load-bearing sliders, front and center ---
-    st.subheader("The 3 numbers that decide everything")
-    pct_slider("Utilization %", "utilization_pct", 5, 60, 1,
-               help="THE B2C lever — unvalidated. ~10% weak location, ~20% base, "
-                    "~35%+ strong. Validate this with real booking data.")
+    # --- The load-bearing sliders, front and center ---
+    # (B2C revenue is now driven by the per-pod sliders in the expander below.)
+    st.subheader("The numbers that decide everything")
     num("Monthly subscription price ($)", "monthly_subscription_price",
         min_value=1000.0, max_value=9000.0, step=100.0,
         help="THE B2B lever = venue's willingness-to-pay. " + BENCHMARKS["Throne"])
@@ -99,17 +97,34 @@ with st.sidebar:
                help="Cost of capital for debt-financed deployment. Asset-backed "
                     "financing only works above a viability threshold (see banner).")
 
-    # --- Unit economics ---
-    with st.expander("Unit economics (shared)"):
-        int_num("Rooms per hub", "rooms_per_hub", min_value=1, max_value=6,
-                help="2 = a 2-person + 4-person room sharing a wall. Drives per-door costs.")
-        num("Prime hours / room / month", "prime_hours_per_month",
-            min_value=0.0, max_value=720.0, step=10.0,
-            help="Bookable prime hours per room per month. 720 ≈ 24/day (generous).")
-        num("Blended hourly rate ($)", "blended_hourly_rate",
-            min_value=5.0, max_value=120.0, step=1.0,
-            help="ALCOVE benchmark: $18/hr single-occupancy. Goodtown's 2- and "
-                 "4-person rooms justify higher.")
+    # --- Per-pod unit economics ---
+    # The conjoined hub = a 2-person pod + a 4-person pod. Each gets its own rate,
+    # utilization, and bookable-hours capacity; revenue is summed across pods.
+    BOOKABLE_HELP = (
+        "Realistic hours/month this pod can ACTUALLY be booked (its available "
+        "capacity) — NOT 24/7. Utilization is a share of THIS number, so it stays "
+        "comparable to occupancy benchmarks (hotels, ALCOVE). Default 300 ≈ 10 "
+        "bookable hrs/day × 30."
+    )
+    with st.expander("Per-pod unit economics", expanded=True):
+        for pod in PODS:
+            st.markdown(f"**{pod['label']}**")
+            num(f"Hourly rate ($) — {pod['label']}", pod["rate_key"],
+                min_value=5.0, max_value=120.0, step=1.0,
+                help="ALCOVE benchmark: $18/hr single-occupancy. The 4-person room "
+                     "justifies a higher rate than the 2-person room.")
+            pct_slider(f"Utilization % — {pod['label']}", pod["util_key"], 5, 60, 1,
+                       help="THE B2C lever — unvalidated. ~10% weak location, ~20% "
+                            "base, ~35%+ strong. Share of this pod's BOOKABLE hours.")
+            num(f"Bookable hours / month — {pod['label']}", pod["bookable_key"],
+                min_value=0.0, max_value=720.0, step=10.0, help=BOOKABLE_HELP)
+        # Computed, revenue-weighted blended rate — read-only (a derived value, not
+        # an input). Recomputed live from whatever the pod sliders are set to.
+        st.metric("Blended hourly rate (computed, read-only)",
+                  f"${calc.blended_hourly_rate(st.session_state):.2f}/hr",
+                  help="Revenue-weighted across both pods: total pod revenue ÷ total "
+                       "booked hours. Derived from the pod sliders — you can't set it "
+                       "directly.")
 
     # --- Cost build-up: the registry-driven section ---
     with st.expander("Cost build-up (capex + opex line items)"):
@@ -157,7 +172,7 @@ with st.sidebar:
             ccat = st.radio("Type", ["opex_fixed", "capex"],
                             format_func=lambda x: "Recurring opex" if x == "opex_fixed" else "One-time capex",
                             horizontal=True)
-            cper_door = st.checkbox("Per door (×rooms_per_hub)")
+            cper_door = st.checkbox("Per door (×total pod door count)")
             capplies = st.multiselect("Applies to models", MODEL_KEYS, default=MODEL_KEYS)
             if st.form_submit_button("Add cost") and cname.strip() and capplies:
                 base = config_io._slug(cname)
@@ -322,11 +337,13 @@ st.subheader("Crossover: where the winner flips")
 x_axis = st.radio("Sweep the X axis by:", ["Utilization", "Subscription price"], horizontal=True)
 
 if x_axis == "Utilization":
-    xs = [round(0.05 + 0.01 * i, 2) for i in range(56)]   # 5% … 60%
-    sweep_key = "utilization_pct"
-    x_plot = [x * 100 for x in xs]
-    x_title = "Utilization (%)"
-    fmt_cross = lambda x: f"{x*100:.0f}%"
+    # Sweep the hidden utilization multiplier (scales BOTH pods together) since
+    # there's no single utilization input anymore. 0.25× … 3.0× of the pods' base.
+    xs = [round(0.25 + 0.05 * i, 2) for i in range(56)]   # 0.25× … 3.0×
+    sweep_key = "util_multiplier"
+    x_plot = xs
+    x_title = "Utilization (× pod base)"
+    fmt_cross = lambda x: f"{x:.2f}×"
 else:
     xs = list(range(1000, 9001, 250))
     sweep_key = "monthly_subscription_price"
@@ -343,7 +360,7 @@ for k in MODEL_KEYS:
 # annotate the B2C × B2B crossover — the headline decision point
 cross = calc.find_crossover(xs, series["b2c"], series["b2b"])
 if cross is not None:
-    cx = cross * 100 if x_axis == "Utilization" else cross
+    cx = cross  # x_plot is already in axis units for both sweeps
     fig.add_vline(x=cx, line_dash="dash", line_color="gray")
     fig.add_annotation(x=cx, y=0, yshift=10,
                        text=f"B2C overtakes B2B at {fmt_cross(cross)}",

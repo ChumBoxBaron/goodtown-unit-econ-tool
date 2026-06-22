@@ -8,7 +8,7 @@ launching the UI, so we trust the numbers before we trust the charts.
 Conventions
 -----------
 * `inputs` is a flat dict of all input values: every registry cost key (hub_cost,
-  smart_lock_hw, ...) plus every HEADLINE_DEFAULTS key (utilization_pct, ...).
+  smart_lock_hw, ...) plus every HEADLINE_DEFAULTS key (pod2_hourly_rate, ...).
 * `items` is the list of cost-item definitions in effect = COST_ITEMS plus any
   runtime "custom costs". Passing it in (rather than importing COST_ITEMS) is what
   lets a custom cost behave exactly like a built-in one.
@@ -16,7 +16,7 @@ Conventions
 * A None payback/ROIC means "undefined" — the UI renders it as "bleeds" / "n/a".
 """
 
-from cost_items import COST_ITEMS, MODELS
+from cost_items import COST_ITEMS, MODELS, PODS, total_doors
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ def resolve_inputs(inputs):
 # ---------------------------------------------------------------------------
 def _sum_items(model_key, inputs, items, category):
     """Sum every item of `category` that applies to `model_key`, honoring per_door."""
-    rooms = inputs.get("rooms_per_hub", 1)
+    doors = total_doors(inputs)
     total = 0.0
     for item in items:
         if item.get("category") != category:
@@ -48,7 +48,7 @@ def _sum_items(model_key, inputs, items, category):
             continue
         value = inputs.get(item["key"], item.get("default", 0))
         if item.get("per_door"):
-            value *= rooms
+            value *= doors
         total += value
     return total
 
@@ -66,11 +66,48 @@ def fixed_opex(model_key, inputs, items=COST_ITEMS):
 # ---------------------------------------------------------------------------
 # Revenue / variable-cost helpers
 # ---------------------------------------------------------------------------
-def usage_hours(inputs):
-    """Booked hours/month across the hub = prime hrs × rooms × utilization."""
-    return (inputs["prime_hours_per_month"]
-            * inputs["rooms_per_hub"]
-            * inputs["utilization_pct"])
+def pod_usage_hours(pod, inputs, util_mult=1.0):
+    """Booked hours/month for ONE pod = bookable hrs × utilization × multiplier.
+
+    `util_mult` is a neutral 1.0 by default; the crossover sweep and the fleet
+    utilization ramp pass a non-1.0 value to scale every pod together without
+    mutating any per-pod key.
+    """
+    return (inputs[pod["bookable_key"]]
+            * inputs[pod["util_key"]]
+            * util_mult)
+
+
+def usage_hours(inputs, util_mult=1.0):
+    """Total booked hours/month across all pods (the hub aggregate)."""
+    return sum(pod_usage_hours(p, inputs, util_mult) for p in PODS)
+
+
+def pod_gross(inputs, util_mult=1.0):
+    """Per-pod revenue summed = Σ (pod hours × pod rate).
+
+    Returns (total_gross, total_hours) so callers that also need hours (the
+    blended-rate display, hybrid overflow) don't recompute them.
+    """
+    gross = hours = 0.0
+    for p in PODS:
+        h = pod_usage_hours(p, inputs, util_mult)
+        gross += h * inputs[p["rate_key"]]
+        hours += h
+    return gross, hours
+
+
+def blended_hourly_rate(inputs, util_mult=1.0):
+    """Revenue-weighted blended hourly rate — a COMPUTED, read-only display value.
+
+    Falls back to the simple average of pod rates when there are zero booked
+    hours (so the UI shows a sane number at 0% utilization instead of dividing
+    by zero).
+    """
+    gross, hours = pod_gross(inputs, util_mult)
+    if hours <= 0:
+        return sum(inputs[p["rate_key"]] for p in PODS) / len(PODS)
+    return gross / hours
 
 
 def venue_charge(gross, inputs, rev_share_pct):
@@ -88,9 +125,9 @@ def payment_processing(gross, inputs):
 # ---------------------------------------------------------------------------
 # Per-model gross + net (monthly, equity basis before financing)
 # ---------------------------------------------------------------------------
-def _gross_net(model_key, inputs, items):
+def _gross_net(model_key, inputs, items, util_mult=1.0):
     if model_key == "b2c":
-        gross = usage_hours(inputs) * inputs["blended_hourly_rate"]
+        gross, _ = pod_gross(inputs, util_mult)
         net = (gross
                - venue_charge(gross, inputs, inputs["venue_rev_share_pct"])
                - payment_processing(gross, inputs)
@@ -110,8 +147,11 @@ def _gross_net(model_key, inputs, items):
         return gross, net
 
     if model_key == "hybrid":
-        overflow_hours = max(0.0, usage_hours(inputs) - inputs["overflow_cap_hours"])
-        overflow_rev = overflow_hours * inputs["blended_hourly_rate"]
+        # Single hub-level cap on TOTAL booked hours across both pods; overflow is
+        # priced at the revenue-weighted blended rate (the base+overflow deal is
+        # struck at the hub level, not per room).
+        overflow_hours = max(0.0, usage_hours(inputs, util_mult) - inputs["overflow_cap_hours"])
+        overflow_rev = overflow_hours * blended_hourly_rate(inputs, util_mult)
         gross = inputs["base_fee_hybrid"] + overflow_rev
         # Rev-share applies to the overflow usage portion only; rent is flat.
         if inputs.get("venue_charge_mode") == "rent":
@@ -169,7 +209,10 @@ def roic_annual(monthly_net, capital):
 # ---------------------------------------------------------------------------
 def compute_model(model_key, inputs, items=COST_ITEMS):
     inputs = resolve_inputs(inputs)
-    gross, net = _gross_net(model_key, inputs, items)
+    # The hidden utilization multiplier (default 1.0) is how the crossover sweep
+    # turns the "utilization knob" across both pods through one input key.
+    util_mult = inputs.get("util_multiplier", 1.0)
+    gross, net = _gross_net(model_key, inputs, items, util_mult=util_mult)
     capital = capital_at_risk(model_key, inputs, items)
 
     is_debt = inputs.get("financing_mode") == "debt"
@@ -214,15 +257,15 @@ def _net_by_age(model_key, inputs, items, ramp_months, horizon_months):
     """Monthly equity-net for a single cohort at each age 0..horizon-1.
 
     Applies a linear utilization ramp: a cohort fills up over `ramp_months` rather
-    than hitting steady-state utilization on day one. Computed by overriding
-    utilization_pct and calling the existing _gross_net — no math is duplicated.
+    than hitting steady-state utilization on day one. The ramp factor is passed as
+    the `util_mult` seam, which scales every pod's utilization together — no per-pod
+    key mutation, no math duplicated.
 
     Usage-independent models (b2b, venue_buys) come out flat by construction: their
     net doesn't read utilization, so the ramp has no effect on them. That's honest,
     not a bug — surfaced in the UI caption.
     """
     inputs = resolve_inputs(inputs)
-    base_util = inputs["utilization_pct"]
     out = []
     for age in range(horizon_months):
         if ramp_months <= 1:
@@ -230,9 +273,7 @@ def _net_by_age(model_key, inputs, items, ramp_months, horizon_months):
         else:
             # age 0 (deploy month) earns 1/ramp of steady-state, climbing to full.
             factor = min(1.0, (age + 1) / ramp_months)
-        probe = dict(inputs)
-        probe["utilization_pct"] = base_util * factor
-        _, net = _gross_net(model_key, probe, items)
+        _, net = _gross_net(model_key, inputs, items, util_mult=factor)
         out.append(net)
     return out
 
@@ -343,8 +384,8 @@ def sweep(inputs, items, x_key, x_values, model_keys, financed=False):
     """Recompute payback for every model across a swept input.
 
     Returns {model_key: [payback or None, ...]} aligned to x_values. Used for the
-    crossover chart: sweep 'utilization_pct' (B2C line collapses) or
-    'monthly_subscription_price' (B2B line moves).
+    crossover chart: sweep 'util_multiplier' (B2C line collapses as both pods fill)
+    or 'monthly_subscription_price' (B2B line moves).
     """
     series = {k: [] for k in model_keys}
     for x in x_values:

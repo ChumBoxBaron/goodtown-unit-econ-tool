@@ -5,10 +5,11 @@ revenue models at once — **B2C pay-per-use**, **B2B subscription**, **venue-bu
 and **base + overflow hybrid** — and shows payback, capital-at-risk, and breakeven side by
 side on the *same* assumptions.
 
-The point isn't a static table. It's watching the **model ranking flip** as the three
+The point isn't a static table. It's watching the **model ranking flip** as the
 numbers we can't yet measure move:
 
-1. **Utilization** — B2C lives or dies here.
+1. **Per-pod utilization** — B2C lives or dies here. The hub is two rooms (a 2-person pod and
+   a 4-person pod), each with its own rate and utilization, so revenue is summed per pod.
 2. **Venue willingness-to-pay** (subscription price) — B2B lives or dies here.
 3. **Cost of capital** — decides whether asset-heavy subscription is survivable for a 2-person team.
 
@@ -37,7 +38,7 @@ python -m pytest test_calculations.py -v
 |---|---|
 | `app.py` | Streamlit UI **only**. Loops over the cost registry to build inputs; renders the table, crossover chart, capital panel, banners, and scenario save/load. |
 | `calculations.py` | The financial math as **pure functions** (no Streamlit). Testable in isolation, so we trust the numbers before the charts. |
-| `cost_items.py` | The **single source of truth** for every cost input: the `COST_ITEMS` registry, the headline/non-registry defaults, and the real-world `BENCHMARKS`. |
+| `cost_items.py` | The **single source of truth** for every input: the `COST_ITEMS` registry, the `PODS` structure (2-person + 4-person rooms), the headline/non-registry defaults, and the real-world `BENCHMARKS`. |
 | `config_io.py` | Save/load named scenarios to `configs/*.json` (Streamlit-free, so the round-trip is unit-tested). |
 | `test_calculations.py` | Hand-worked assertions on the math, registry sums, custom costs, and save/load. |
 
@@ -69,6 +70,16 @@ button all loop over the registry, so there's exactly one place to change.
 
 **Departures from a naive model, on purpose:**
 
+- **Two distinct pods, not N identical rooms.** A conjoined hub is physically a **2-person
+  room + a 4-person room** with genuinely different pricing power. Each pod carries its own
+  hourly rate, utilization, and bookable-hours capacity; hub revenue is the **sum** of per-pod
+  revenue. The "blended hourly rate" is a *computed, revenue-weighted, read-only* display value
+  — not an input you have to back into. Per-door capex (locks) is driven by total door count
+  across pods (2 by default). Defined once in `PODS` (`cost_items.py`), looped over everywhere.
+- **Honest utilization denominator.** Utilization is a share of each pod's
+  `bookable_hours_per_month` — the *realistic* hours a pod can actually be booked (default 300 ≈
+  10 hrs/day × 30), **not** 24/7 clock hours. That keeps "20% utilization" comparable to
+  occupancy benchmarks (hotels, ALCOVE) instead of silently meaning 20% of all 720 clock hours.
 - **Itemized capital-at-risk.** The Mute hub quote (~$44k) *excludes* the smart lock, LTE
   router, and install — so a hub-only `unit_cost` understates the exact number that kills a
   2-person team. We model the full capex stack (hub + lock×doors + router + install).
@@ -95,10 +106,11 @@ earns net cash thereafter; the portfolio is the sum across live cohorts.
   all units at once, the steady-state read) — exactly the same "we can't measure it, so make it
   a lever" stance as utilization and cost of capital. The staggered schedule is *generated*, so
   you never hand-build irregular timing.
-- **Per-cohort utilization ramp.** Each new location climbs linearly to the utilization slider
-  over *ramp months* — new venues take time to fill. The ramp affects **usage-based models only**
-  (B2C, hybrid overflow); B2B / venue-buys earn full net from month one because their revenue
-  doesn't depend on utilization.
+- **Per-cohort utilization ramp.** Each new location climbs linearly to its steady-state
+  per-pod utilization over *ramp months* — new venues take time to fill. (Mechanically, the ramp
+  scales both pods together via a hidden utilization multiplier.) The ramp affects **usage-based
+  models only** (B2C, hybrid overflow); B2B / venue-buys earn full net from month one because
+  their revenue doesn't depend on utilization.
 - **The headline metric is the peak cash trough** — the deepest the running cash balance goes,
   i.e. the most capital tied up at once on this schedule. That, plus "outside capital needed
   beyond your available cash" and the **breakeven month**, is the cash story that decides whether
